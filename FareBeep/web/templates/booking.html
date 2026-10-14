@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FareBeep - Confirm booking</title>
+<style>
+ body { font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        background:#0b1220; color:#e8eef7; display:grid; place-items:center;
+        min-height:100vh; margin:0; }
+ .card { background:#131c2e; border:1px solid #26324a; border-radius:16px;
+         padding:2rem; max-width:26rem; width:100%; box-sizing:border-box; }
+ h1 { font-size:1.25rem; margin:0 0 .25rem; }
+ .route { color:#9fb0c9; margin:0 0 1.25rem; }
+ .row { display:flex; justify-content:space-between; padding:.35rem 0;
+        border-bottom:1px solid #1f2a3f; color:#9fb0c9; }
+ .row.total { border-bottom:none; color:#e8eef7; font-weight:700;
+              font-size:1.1rem; }
+ .locked { font-size:.8rem; color:#6ee7a0; margin:1rem 0; }
+ label { display:block; font-size:.8rem; color:#9fb0c9; margin:.9rem 0 .3rem; }
+ input { width:100%; box-sizing:border-box; background:#0b1220;
+         border:1px solid #26324a; border-radius:10px; color:#e8eef7;
+         padding:.7rem; font-size:.95rem; }
+ .notice { background:#101a2c; border:1px solid #26324a; border-radius:10px;
+           padding:.9rem; font-size:.8rem; color:#9fb0c9; line-height:1.5;
+           margin:1rem 0; }
+ button { width:100%; background:#22c55e; color:#06210f; border:0;
+          border-radius:10px; padding:.85rem; font-size:1rem; font-weight:700;
+          cursor:pointer; }
+</style></head>
+<body>
+<div class="card">
+  <h1>Confirm your booking</h1>
+  <p class="route">{{ origin }} &rarr; {{ destination }} &middot; {{ flight_date }} &middot; {{ airline }}</p>
+
+  <div class="row"><span>Airline price</span><span>&#8358;{{ airline_price }}</span></div>
+  <div class="row"><span>Markup + fees</span><span>&#8358;{{ fees }}</span></div>
+  <div class="row total"><span>Total to pay</span><span>&#8358;{{ total }}</span></div>
+
+  <p class="locked">Price locked, valid until {{ expires }} today. Payments after
+  the window are auto-refunded.</p>
+
+  <form method="post" action="/book/{{ session_id }}/confirm">
+    <label for="passenger_name">Passenger full name (as on ID)</label>
+    <input id="passenger_name" name="passenger_name" required
+           maxlength="80" placeholder="e.g. Chinedu Okafor">
+    <label for="contact_email">Email for your ticket</label>
+    <input id="contact_email" name="contact_email" type="email" required
+           maxlength="120" value="{{ email_value }}"
+           placeholder="you@example.com">
+    <div class="notice">{{ consent_text }}</div>
+    <button type="submit">I agree &amp; Proceed to Payment</button>
+  </form>
+</div>
+</body></html>

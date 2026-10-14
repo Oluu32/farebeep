@@ -5,6 +5,7 @@ psycopg2-binary
 pydantic
 python-dotenv
 httpx
+jinja2
 requests
 cryptography
 twilio

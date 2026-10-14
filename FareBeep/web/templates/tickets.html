@@ -1,0 +1,56 @@
+{% if expired %}
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link expired - FareBeep</title></head>
+<body style="font-family:system-ui,sans-serif;background:#0b1220;color:#e8eefc;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center;padding:24px">
+<div style="font-size:40px">⏳</div>
+<h1 style="font-size:20px">Link expired</h1>
+<p style="color:#8fa3c8">Ask the FareBeep bot on WhatsApp again - say
+<b>my bookings</b> - and you'll get a fresh one.</p>
+</div></body></html>
+{% else %}
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My bookings - FareBeep</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b1220;color:#e8eefc;
+margin:0;padding:24px 16px;max-width:480px;margin-inline:auto}
+h1{font-size:20px} .card{background:#141d33;border-radius:12px;
+padding:14px 16px;margin:10px 0} .route{font-weight:700;font-size:17px}
+.meta{color:#8fa3c8;font-size:13px;margin-top:4px}
+.btn{display:inline-block;background:#2b6cff;color:#fff;text-decoration:none;
+padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600}
+.sec{color:#8fa3c8;font-size:12px;margin-top:24px;text-align:center}
+</style></head><body>
+<h1>🔐 My bookings</h1>
+<p style="color:#8fa3c8;font-size:13px">Signed in as {{ phone }} · read-only view</p>
+{% if no_account %}
+<p style='color:#8fa3c8'>No account found.</p>
+{% else %}
+{% for b in bookings %}
+<div class="card"><div class="route">{{ b.origin }} → {{ b.destination }}</div>
+<div class="meta">📅 {{ b.flight_date or '—' }} · ₦{{ b.total }}</div>
+<div class="meta">{% if b.status == 'paid' %}<span style="color:#5ad19b">● Ticket confirmed</span>
+{% elif b.status == 'pending' %}<span style="color:#f5c451">○ Awaiting payment</span>
+{% else %}<span style="color:#8fa3c8">✕ Closed</span>{% endif %} · {% if b.pnr %}PNR <b>{{ b.pnr }}</b> · {% endif %}ref {{ b.payment_ref }}</div>
+{% if b.checkin_url %}<div class="meta" style="margin-top:10px"><a class="btn" href="{{ b.checkin_url }}" target="_blank" rel="noopener">Check in online · {{ b.airline }}</a></div>{% endif %}
+{% if b.pass_url %}<div class="meta" style="margin-top:10px"><a class="btn" style="background:#1c2a47" href="{{ b.pass_url }}">🎫 Boarding pass · {{ b.boarding_pass_name }}</a></div>{% endif %}
+</div>
+{% else %}
+<p style='color:#8fa3c8'>No bookings yet - search a fare in the chat and book one.</p>
+{% endfor %}
+{% if beeps %}
+<h2 style='font-size:16px;margin-top:24px'>Price beeps</h2>
+{% for s in beeps %}
+<div class="card"><div class="route">{{ s.origin }} → {{ s.destination }}</div><div class="meta">
+<span style='color:#5ad19b'>●</span> {{ s.state }}{% if s.target %} · below ₦{{ s.target }}{% endif %} · until {{ s.target_date }}</div></div>
+{% endfor %}
+{% endif %}
+{% endif %}
+<p class="sec">Link expires after 15 minutes · FareBeep</p>
+</body></html>
+{% endif %}

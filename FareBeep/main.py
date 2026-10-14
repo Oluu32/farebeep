@@ -61,9 +61,10 @@ from FareBeep.config import (ADMIN_TOKEN, APP_BASE_URL, CONSENT_VERSION,
 from FareBeep.database import SessionLocal, init_db
 from FareBeep.iata import city_name, resolve_iata
 from FareBeep.models import (BookingSession, ChatState, DeliveryReceipt,
-                             FareLedger, ProcessedMessage, Subscription,
+                             FareLedger, ProcessedMessage, SessionStatus, Subscription,
                              User, utcnow)
 from FareBeep.notifier import MetaWhatsapp, get_notifier
+from FareBeep.templating import render_html
 from FareBeep.payments import verify_paystack_signature
 from FareBeep.search import LedgerOnlyEngine, LedgerSearch
 from FareBeep.suppliers import get_inventory_client, pick_cheapest
@@ -118,23 +119,6 @@ def _startup():
                            recovered)
     except Exception as e:
         logger.error("Startup recovery failed (non-fatal): %s", e)
-
-
-# ---------------------------------------------------------------------------
-# Meta Cloud API Webhook - HANDSHAKE
-# ---------------------------------------------------------------------------
-@app.get("/webhook/meta")
-async def meta_verify(request: Request):
-    """GET verification: echo hub.challenge when hub.verify_token matches."""
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == META_VERIFY_TOKEN:
-        logger.info("Meta webhook subscribed (handshake OK)")
-        return PlainTextResponse(challenge, media_type="text/plain")
-    logger.warning("Meta handshake rejected (mode=%r token=%r)", mode, token)
-    return Response(status_code=403)
 
 
 # ---------------------------------------------------------------------------
@@ -912,26 +896,6 @@ def _record_statuses(payload: dict) -> int:
     return recorded
 
 
-@app.post("/webhook/meta")
-async def meta_webhook(request: Request, background: BackgroundTasks):
-    raw = await request.body()
-
-    if not _verify_meta_signature(raw, request.headers.get("X-Hub-Signature-256", "")):
-        logger.warning("Meta webhook REJECTED: bad X-Hub-Signature-256")
-        return Response(status_code=403)
-
-    payload = await request.json()
-    # Status callbacks ride the same webhook - record first so a
-    # statuses-only payload still tracks delivery before the 200 ack.
-    _record_statuses(payload)
-    claimed = _claim_inbound_messages(_classify_all_entries(payload))
-
-    # Ack Meta immediately (20s deadline); the batch runs off-thread.
-    # NOTE: plain "200 OK" (not {"status":"ok"}) keeps the existing
-    # webhook contract + tests green - the status code is the ack.
-    if claimed:
-        background.add_task(_process_inbound_batch, claimed)
-    return Response(content="200 OK", media_type="text/plain")
 
 
 # Standalone greetings: the WHOLE message is the greeting, nothing else.
@@ -2828,41 +2792,6 @@ def _verify_telegram_secret(secret: str) -> bool:
     return bool(expected) and hmac.compare_digest(expected, secret)
 
 
-@app.post("/webhook/telegram")
-async def telegram_webhook(request: Request, background: BackgroundTasks):
-    """Telegram Bot API receiver (JSON, secret-token header verified).
-
-    The chat_id IS the user identity (stored where a phone number would
-    live on the WhatsApp channels), so the whole conversational pipeline
-    is reused unchanged.
-    """
-    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not _verify_telegram_secret(secret):
-        logger.warning("Telegram webhook REJECTED: bad secret token")
-        return Response(status_code=403)
-
-    update = await request.json()
-    # Button taps arrive as callback_query updates (inline keyboards).
-    # Route them through the SAME gates as Meta button_reply taps.
-    cbq = update.get("callback_query") or {}
-    if cbq:
-        cb_id = str(cbq.get("id") or "")
-        data = str(cbq.get("data") or "")
-        cb_chat = str(((cbq.get("message") or {}).get("chat") or {})
-                      .get("id") or "")
-        if cb_id:
-            background.add_task(_telegram_callback, cb_id, cb_chat, data)
-        return {"ok": True}
-    message = update.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = str(chat.get("id") or "")
-    text = str(message.get("text") or "")
-    if text and chat_id:
-        # typing bubble runs as a background task (FIFO, before the reply
-        # task): a dead Telegram API must never delay the 200 ack
-        background.add_task(_telegram_typing, chat_id)
-        background.add_task(_handle_incoming_message, chat_id, text)
-    return {"ok": True}
 
 
 def _telegram_typing(chat_id: str) -> None:
@@ -2870,9 +2799,6 @@ def _telegram_typing(chat_id: str) -> None:
     TelegramBot().send_action(chat_id)  # typing… (best-effort)
 
 
-@app.get("/webhook/telegram")
-async def telegram_verify(request: Request):
-    return PlainTextResponse("FareBeep Telegram webhook is live")
 
 
 # ---------------------------------------------------------------------------
@@ -2980,116 +2906,10 @@ def _admin_ok(request: Request) -> bool:
     return bool(provided) and hmac.compare_digest(expected, provided)
 
 
-@app.get("/admin/ops")
-def admin_ops(request: Request):
-    """One ops snapshot: inbound dispatch health, dead letters, outbound
-    receipts, beeps, bookings, and which brain answered. Read-only."""
-    if not _admin_ok(request):
-        return Response(status_code=404)
-    db = SessionLocal()
-    try:
-        inbound = dict(db.query(
-            ProcessedMessage.status, func.count(ProcessedMessage.message_id)
-        ).group_by(ProcessedMessage.status).all())
-        from datetime import timedelta
-        stale_queued = db.query(ProcessedMessage).filter(
-            ProcessedMessage.status == "queued",
-            ProcessedMessage.created_at < utcnow() - timedelta(minutes=5)
-        ).count()
-        dead_rows = db.query(ProcessedMessage).filter(
-            ProcessedMessage.status == "failed"
-        ).order_by(ProcessedMessage.created_at.desc()).limit(20).all()
-        dead = [{
-            "message_id": r.message_id,
-            "phone": r.phone,
-            "attempts": r.attempts,
-            "last_error": (r.last_error or "")[:300],
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "replayable": bool((r.payload or {}).get("message_id")),
-        } for r in dead_rows]
-        receipts = dict(db.query(
-            DeliveryReceipt.status, func.count(DeliveryReceipt.message_id)
-        ).group_by(DeliveryReceipt.status).all())
-        subs = db.query(Subscription).all()
-        bookings = db.query(BookingSession.status,
-                            func.count(BookingSession.id)
-                            ).group_by(BookingSession.status).all()
-        return {
-            "inbound": {"by_status": inbound, "stale_queued_5m": stale_queued},
-            "dead_letters_recent": dead,
-            "delivery_receipts": {"by_status": receipts},
-            "beeps": {
-                "total": len(subs),
-                "active": sum(1 for s in subs if not s.paused),
-                "paused": sum(1 for s in subs if s.paused),
-            },
-            "bookings": {str(getattr(k, "value", k)): v for k, v in bookings},
-            "support": {"open_threads": _ops_support_rows(db)},
-            "ledger": _ops_ledger(db),
-            "agent_this_process": dict(_agent_stats),
-        }
-    finally:
-        db.close()
 
 
-@app.post("/admin/ops/dead-letters/{message_id}/replay")
-def admin_replay_dead_letter(message_id: str, request: Request):
-    """Re-dispatch one dead-lettered inbound from its stored payload,
-    through the exact recovery path (per-phone lock, single turn).
-    Synchronous on purpose: the caller sees the new terminal state."""
-    if not _admin_ok(request):
-        return Response(status_code=404)
-    db = SessionLocal()
-    try:
-        row = db.query(ProcessedMessage).filter(
-            ProcessedMessage.message_id == message_id).first()
-        if row is None or row.status != "failed":
-            return JSONResponse({"replayed": False,
-                                 "reason": "not a dead letter"}, status_code=404)
-        payload = row.payload or {}
-        if not payload.get("message_id"):
-            return JSONResponse({"replayed": False,
-                                 "reason": "no stored payload (pre-recovery row)"})
-        m = _restore_message(payload)
-        phone = m.from_number or row.phone or ""
-        if not phone:
-            return JSONResponse({"replayed": False,
-                                 "reason": "no phone on payload"})
-        with _phone_lock(phone):
-            try:
-                _dispatch_single(m)
-                _mark_processed(m.message_id, "done")
-                return {"replayed": True, "message_id": m.message_id}
-            except Exception as e:
-                _mark_processed(m.message_id, "failed", error=f"replay: {e}")
-                return JSONResponse({"replayed": False,
-                                     "reason": str(e)[:300]})
-    finally:
-        db.close()
 
 
-@app.post("/admin/ops/ledger/warm-now")
-def admin_warm_ledger_now(request: Request):
-    """Trigger a ledger warm cycle immediately (bypasses the 15-minute
-    interval gate - the worker's scheduled cycle still runs as usual).
-    Synchronous like replay: the caller sees the real counts. 247travels
-    login failure surfaces as warmed=0 + error, not a 500."""
-    if not _admin_ok(request):
-        return Response(status_code=404)
-    import FareBeep.warmer as warmer
-    try:
-        stats = warmer.warm_ledger()
-        if stats.get("skipped_test_mode"):
-            return JSONResponse({"ok": False,
-                                 "reason": "TRAVELS247_MODE=test: demo "
-                                 "credentials must not cache fares",
-                                 **stats}, status_code=409)
-        stats["ok"] = stats.get("errors", 0) < stats.get("routes", 1) * len(stats.get("dates", []))
-        return stats
-    except Exception as e:
-        logger.exception("Warm-now failed")
-        return JSONResponse({"ok": False, "error": str(e)[:300]},
-                            status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -3500,78 +3320,6 @@ def _ask_ticket_details(db, session, pnr: str) -> None:
                        "appears on their ID?")
 
 
-@app.post("/webhook/paystack")
-async def paystack_webhook(request: Request):
-    """Paystack event receiver - X-Paystack-Signature (HMAC-SHA512) verified
-    over the RAW body. On charge.success the booking is gated by expires_at:
-
-      now() <= expires_at  -> status = paid, mock Ticket Issued (PNR FB-XXXX)
-      now() >  expires_at  -> status = expired, Refund Required admin alert
-                              + the user is told a refund/price-match is coming
-    """
-    raw = await request.body()
-    if not verify_paystack_signature(
-            raw, request.headers.get("x-paystack-signature", "")):
-        logger.warning("Paystack webhook REJECTED: bad signature")
-        return Response(status_code=403)
-
-    payload = await request.json()
-    event = payload.get("event", "")
-    data = payload.get("data") or {}
-    reference = str(data.get("reference", ""))
-    status = str(data.get("status", ""))
-
-    db = SessionLocal()
-    try:
-        bookings = BookingService(db)
-        outcome = bookings.settle_payment(reference, status)
-        logger.info("Paystack %s -> %s", reference, outcome["outcome"])
-
-        session = outcome.get("session")
-        if outcome["outcome"] == "paid":
-            pnr, ticket_note, provisional = await _maybe_issue_247travels_ticket(
-                session, outcome.get("pnr") or "FB-????")
-            _notify_session_user(
-                session,
-                f"✅ BOOKING CONFIRMED - payment received!\n"
-                f"PNR: {pnr}{provisional}\n"
-                f"{city_name(session.origin)} -> {city_name(session.destination)} "
-                f"{session.flight_date}\n"
-                f"Paid: ₦{session.total_price:,.0f}\n"
-                f"{ticket_note} Safe travels!")
-            if session.passenger_name and session.contact_email:
-                _send_ticket_pdf(session, pnr)
-            else:
-                # /book page form skipped - collect in chat, then voucher.
-                _ask_ticket_details(db, session, pnr)
-        elif outcome["outcome"] == "refund_required":
-            _notify_session_user(
-                session,
-                "Payment was successful, but the 10-minute window closed. "
-                "Your refund is being processed automatically - no "
-                "questions.")
-            # THE REFUND PROMISE: the airline was never ticketed, so the
-            # money goes back via the Paystack API - not just an alert.
-            refunded = False
-            try:
-                from FareBeep.payments import refund_paystack_transaction
-                refund_paystack_transaction(reference)
-                refunded = True
-            except Exception as e:
-                logger.error("Auto-refund failed for %s: %s", reference, e)
-            if refunded:
-                tail = "No action needed - Paystack refund issued."
-            else:
-                tail = ("MANUAL REFUND REQUIRED - the Paystack refund call "
-                        "failed.")
-            _notify_admin(
-                f"{'AUTO-REFUNDED' if refunded else 'REFUND FAILED'}: "
-                f"{reference} was paid after its 10-minute lock expired "
-                f"({session.expires_at}); the airline API was NOT called. "
-                f"{tail}")
-        return {"ok": True, "outcome": outcome["outcome"]}
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3657,331 +3405,33 @@ the latest fare for you.</p>
 
 
 def _booking_page(session: BookingSession, user_email: str = None) -> HTMLResponse:
-    origin = city_name(session.origin)
-    destination = city_name(session.destination)
-    airline = (session.flight_details or {}).get("airline") or "—"
-    expires = session.expires_at.strftime("%H:%M")
-    email_value = user_email or session.contact_email or ""
-    html = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FareBeep - Confirm booking</title>
-<style>
- body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-        background:#0b1220; color:#e8eef7; display:grid; place-items:center;
-        min-height:100vh; margin:0; }}
- .card {{ background:#131c2e; border:1px solid #26324a; border-radius:16px;
-         padding:2rem; max-width:26rem; width:100%; box-sizing:border-box; }}
- h1 {{ font-size:1.25rem; margin:0 0 .25rem; }}
- .route {{ color:#9fb0c9; margin:0 0 1.25rem; }}
- .row {{ display:flex; justify-content:space-between; padding:.35rem 0;
-         border-bottom:1px solid #1f2a3f; color:#9fb0c9; }}
- .row.total {{ border-bottom:none; color:#e8eef7; font-weight:700;
-               font-size:1.1rem; }}
- .locked {{ font-size:.8rem; color:#6ee7a0; margin:1rem 0; }}
- label {{ display:block; font-size:.8rem; color:#9fb0c9; margin:.9rem 0 .3rem; }}
- input {{ width:100%; box-sizing:border-box; background:#0b1220;
-         border:1px solid #26324a; border-radius:10px; color:#e8eef7;
-         padding:.7rem; font-size:.95rem; }}
- .notice {{ background:#101a2c; border:1px solid #26324a; border-radius:10px;
-           padding:.9rem; font-size:.8rem; color:#9fb0c9; line-height:1.5;
-           margin:1rem 0; }}
- button {{ width:100%; background:#22c55e; color:#06210f; border:0;
-          border-radius:10px; padding:.85rem; font-size:1rem; font-weight:700;
-          cursor:pointer; }}
-</style></head>
-<body>
-<div class="card">
-  <h1>Confirm your booking</h1>
-  <p class="route">{origin} &rarr; {destination} &middot; {session.flight_date} &middot; {airline}</p>
-
-  <div class="row"><span>Airline price</span><span>&#8358;{session.airline_price:,.0f}</span></div>
-  <div class="row"><span>Markup + fees</span><span>&#8358;{session.markup + session.processing_fee:,.0f}</span></div>
-  <div class="row total"><span>Total to pay</span><span>&#8358;{session.total_price:,.0f}</span></div>
-
-  <p class="locked">Price locked, valid until {expires} today. Payments after
-  the window are auto-refunded.</p>
-
-  <form method="post" action="/book/{session.id}/confirm">
-    <label for="passenger_name">Passenger full name (as on ID)</label>
-    <input id="passenger_name" name="passenger_name" required
-           maxlength="80" placeholder="e.g. Chinedu Okafor">
-    <label for="contact_email">Email for your ticket</label>
-    <input id="contact_email" name="contact_email" type="email" required
-           maxlength="120" value="{email_value}"
-           placeholder="you@example.com">
-    <div class="notice">{_CONSENT_TEXT.format(version=CONSENT_VERSION)}</div>
-    <button type="submit">I agree &amp; Proceed to Payment</button>
-  </form>
-</div>
-</body></html>"""
-    return HTMLResponse(html)
+    return render_html(
+        "booking.html",
+        origin=city_name(session.origin),
+        destination=city_name(session.destination),
+        flight_date=session.flight_date,
+        airline=(session.flight_details or {}).get("airline") or "—",
+        expires=session.expires_at.strftime("%H:%M"),
+        session_id=session.id,
+        airline_price=f"{session.airline_price:,.0f}",
+        fees=f"{session.markup + session.processing_fee:,.0f}",
+        total=f"{session.total_price:,.0f}",
+        email_value=user_email or session.contact_email or "",
+        consent_text=_CONSENT_TEXT.format(version=CONSENT_VERSION),
+    )
 
 
-@app.get("/book/{session_id}")
-def booking_page(session_id: uuid.UUID):
-    db = SessionLocal()
-    try:
-        session = db.get(BookingSession, session_id)
-        if session is None:
-            return _booking_not_found()
-        if _is_expired(session):
-            return _booking_closed(session.origin, session.destination)
-        user = db.get(User, session.user_id)
-        return _booking_page(session, user_email=user.email if user else None)
-    finally:
-        db.close()
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-@app.post("/book/{session_id}/confirm")
-async def booking_confirm(session_id: uuid.UUID, request: Request):
-    """Capture ticket-holder details + NDPA consent, then Paystack."""
-    form = dict(await request.form())
-    db = SessionLocal()
-    try:
-        session = db.get(BookingSession, session_id)
-        if session is None:
-            return _booking_not_found()
-        if _is_expired(session):
-            return _booking_closed(session.origin, session.destination)
-        user = db.get(User, session.user_id)
-        name = str(form.get("passenger_name") or "").strip()[:80]
-        email = str(form.get("contact_email") or "").strip().lower()[:120]
-        if not name or not _EMAIL_RE.match(email):
-            return HTMLResponse(status_code=422, content=(
-                "<!doctype html><meta charset='utf-8'>"
-                "<body style='font-family:system-ui;background:#0b1220;"
-                "color:#e8eef7;padding:2rem'>Please enter a valid "
-                "passenger name and email address. "
-                "<a style='color:#6ee7a0' href='javascript:history.back()'>"
-                "Go back</a>.</body>"))
-        session.passenger_name = name
-        session.contact_email = email
-        if user is not None:
-            user.consent_at = utcnow()
-            user.consent_text_version = CONSENT_VERSION
-            if not user.email:
-                user.email = email
-            logger.info("Consent recorded v%s for user %s (booking %s)",
-                        CONSENT_VERSION, session.user_id, session.payment_ref)
-        db.commit()
-        return RedirectResponse(session.callback_url or "/payment/status",
-                                status_code=303)
-    finally:
-        db.close()
 
 
-# ---------------------------------------------------------------------------
-# "My tickets" page - the read-only browser view behind the signed chat
-# link. Mobile-first (it opens in WhatsApp's in-app webview): no cookies,
-# no JS, no lateral links - the token is the session.
-# ---------------------------------------------------------------------------
-@app.get("/tickets", include_in_schema=False)
-def tickets_page(t: str = ""):
-    # Airline online check-in portals (verified official URLs). Airlines
-    # expose no check-in API, so FareBeep deep-links the user to the
-    # carrier's own portal - the honest version of "check in with us".
-    import urllib.parse
-    checkin_urls = {
-        "air peace": "https://book-airpeace.crane.aero/ibe/checkin/search",
-        "ibom air": "https://www.ibomair.com/check-in/",
-        "green africa": "https://greenafrica.com/check-in/login",
-        "arik air": "https://arikair.crane.aero/ibe/checkin/search",
-    }
-
-    def _checkin_link(booking) -> str:
-        import json as _json
-        try:
-            details = _json.loads(booking.flight_details) \
-                if booking.flight_details else {}
-        except Exception:
-            details = {}
-        airline = str(details.get("airline") or "").strip()
-        if not airline:
-            return ""
-        url = checkin_urls.get(airline.lower())
-        if not url:
-            url = ("https://www.google.com/search?q="
-                   + urllib.parse.quote(f"{airline} online check-in"))
-        return (f"<a class='btn' href='{url}' target='_blank' "
-                f"rel='noopener'>Check in online · {airline}</a>")
-
-    phone = _ticket_link_phone(t)
-    if not phone:
-        return HTMLResponse("""<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Link expired - FareBeep</title></head>
-<body style="font-family:system-ui,sans-serif;background:#0b1220;color:#e8eefc;
-display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
-<div style="text-align:center;padding:24px">
-<div style="font-size:40px">⏳</div>
-<h1 style="font-size:20px">Link expired</h1>
-<p style="color:#8fa3c8">Ask the FareBeep bot on WhatsApp again - say
-<b>my bookings</b> - and you'll get a fresh one.</p>
-</div></body></html>""", status_code=403)
-
-    from FareBeep.transactions import pnr_from_ref
-    from FareBeep.models import Subscription
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.phone == phone).first()
-        if not user:
-            body_rows = "<p style='color:#8fa3c8'>No account found.</p>"
-        else:
-            bookings = (db.query(BookingSession)
-                        .filter(BookingSession.user_id == user.user_id)
-                        .order_by(BookingSession.created_at.desc())
-                        .limit(20).all())
-            beeps = (db.query(Subscription)
-                     .filter(Subscription.user_id == user.user_id)
-                     .all())
-            rows = []
-            for b in bookings:
-                if b.status == "paid":
-                    badge = "<span style='color:#5ad19b'>● Ticket confirmed</span>"
-                    pnr = pnr_from_ref(b.payment_ref)
-                    ref = f"PNR <b>{pnr}</b> · ref {b.payment_ref}"
-                    cta = _checkin_link(b)
-                elif b.status == "pending":
-                    badge = "<span style='color:#f5c451'>○ Awaiting payment</span>"
-                    ref = f"ref {b.payment_ref}"
-                    cta = ""
-                else:
-                    badge = "<span style='color:#8fa3c8'>✕ Closed</span>"
-                    ref = f"ref {b.payment_ref}"
-                    cta = ""
-                rows.append(
-                    f"<div class='card'><div class='route'>{b.origin} → "
-                    f"{b.destination}</div>"
-                    f"<div class='meta'>📅 {b.flight_date or '—'} · "
-                    f"₦{b.total_price:,.0f}</div>"
-                    f"<div class='meta'>{badge} · {ref}</div>"
-                    + (f"<div class='meta' style='margin-top:10px'>{cta}</div>"
-                       if cta else "")
-                    + (f"<div class='meta' style='margin-top:10px'>"
-                       f"<a class='btn' style='background:#1c2a47' "
-                       f"href='/tickets/pass?t={t}&amp;b={b.id}'>"
-                       f"🎫 Boarding pass · {b.boarding_pass_name}</a></div>"
-                       if b.boarding_pass_blob else "")
-                    + "</div>")
-            if not rows:
-                rows.append("<p style='color:#8fa3c8'>No bookings yet - "
-                            "search a fare in the chat and book one.</p>")
-            if beeps:
-                rows.append("<h2 style='font-size:16px;margin-top:24px'>"
-                            "Price beeps</h2>")
-                for s in beeps:
-                    state = "paused" if s.paused else "watching"
-                    tgt = f" · below ₦{s.target_price:,.0f}" if s.target_price else ""
-                    rows.append(
-                        f"<div class='card'><div class='route'>{s.origin} → "
-                        f"{s.destination}</div><div class='meta'>"
-                        f"<span style='color:#5ad19b'>●</span> {state}"
-                        f"{tgt} · until {s.target_date}</div></div>")
-            body_rows = "".join(rows)
-    finally:
-        db.close()
-
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>My bookings - FareBeep</title>
-<style>
-body{{font-family:system-ui,sans-serif;background:#0b1220;color:#e8eefc;
-margin:0;padding:24px 16px;max-width:480px;margin-inline:auto}}
-h1{{font-size:20px}} .card{{background:#141d33;border-radius:12px;
-padding:14px 16px;margin:10px 0}} .route{{font-weight:700;font-size:17px}}
-.meta{{color:#8fa3c8;font-size:13px;margin-top:4px}}
-.btn{{display:inline-block;background:#2b6cff;color:#fff;text-decoration:none;
-padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600}}
-.sec{{color:#8fa3c8;font-size:12px;margin-top:24px;text-align:center}}
-</style></head><body>
-<h1>🔐 My bookings</h1>
-<p style="color:#8fa3c8;font-size:13px">Signed in as {phone} · read-only view</p>
-{body_rows}
-<p class="sec">Link expires after 15 minutes · FareBeep</p>
-</body></html>"""
-    return HTMLResponse(html)
 
 
-# ---------------------------------------------------------------------------
-# Boarding-pass download - same signed-link session as /tickets, scoped to
-# one booking; the link token's phone must own the booking.
-# ---------------------------------------------------------------------------
-@app.get("/tickets/pass", include_in_schema=False)
-def boarding_pass(t: str = "", b: str = ""):
-    phone = _ticket_link_phone(t)
-    if not phone:
-        return HTMLResponse("Link expired - ask the bot for a fresh one.",
-                            status_code=403)
-    import uuid as _uuid
-    from FareBeep.models import BookingSession
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.phone == phone).first()
-        booking = None
-        if user:
-            try:
-                bid = _uuid.UUID(b)
-            except ValueError:
-                bid = None
-            if bid:
-                booking = (db.query(BookingSession)
-                           .filter(BookingSession.id == bid,
-                                   BookingSession.user_id == user.user_id)
-                           .first())
-        if not booking or not booking.boarding_pass_blob:
-            return HTMLResponse("No boarding pass on file for this booking.",
-                                status_code=404)
-        from fastapi.responses import Response as FastResponse
-        return FastResponse(
-            content=booking.boarding_pass_blob,
-            media_type=booking.boarding_pass_mime or "application/pdf",
-            headers={"Content-Disposition":
-                     f'inline; filename="{booking.boarding_pass_name}"'})
-    finally:
-        db.close()
 
 
-# ---------------------------------------------------------------------------
-# Payment status page - where Paystack sends the user after checkout
-# (PAYSTACK_CALLBACK_URL). The actual settlement happens in the webhook;
-# this page is just a friendly confirmation screen.
-# ---------------------------------------------------------------------------
-@app.get("/payment/status")
-def payment_status(reference: str = ""):
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FareBeep - Payment</title>
-<style>
-  body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-         background: #0b1220; color: #e8eef7; display: grid; place-items: center;
-         min-height: 100vh; margin: 0; }}
-  .card {{ background: #131c2e; border: 1px solid #26324a; border-radius: 16px;
-          padding: 2.5rem; max-width: 26rem; text-align: center; }}
-  .check {{ font-size: 3rem; }}
-  h1 {{ font-size: 1.25rem; margin: 0.75rem 0 0.5rem; }}
-  p {{ color: #9fb0c9; margin: 0.25rem 0; line-height: 1.5; }}
-  .ref {{ color: #64748b; font-size: 0.85rem; margin-top: 1rem; }}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="check">✅</div>
-  <h1>Payment received</h1>
-  <p>Your booking is being confirmed.<br>We&#39;ll send your ticket and PNR to your WhatsApp shortly.</p>
-  <p class="ref">Reference: {reference or "—"}</p>
-</div>
-</body>
-</html>"""
-    return HTMLResponse(html)
 
 
 # ---------------------------------------------------------------------------
@@ -4018,14 +3468,14 @@ def landing():
                         headers={"Cache-Control": "no-cache"})
 
 
-@app.get("/admin", include_in_schema=False)
-def admin_cockpit():
-    """The ops cockpit - a browser UI over /admin/ops + dead-letter
-    replay. Only the SHELL is served here (when ADMIN_TOKEN is set);
-    the data still demands the X-Admin-Token header via fetch, so the
-    token never rides a URL or a log. Unset token = closed surface
-    (404, like every admin route)."""
-    if not ADMIN_TOKEN:
-        return Response(status_code=404)
-    return FileResponse(WEB_DIR / "admin.html",
-                        headers={"Cache-Control": "no-store"})
+
+# Webhook endpoints (Meta, Telegram, Paystack) live in routers/webhooks.py.
+# Mounted last: that module reads helpers off this module at request time.
+from FareBeep.routers.webhooks import router as webhooks_router  # noqa: E402
+app.include_router(webhooks_router)
+
+# Booking/checkout/ticket and admin endpoints live in routers/.
+from FareBeep.routers.booking import router as booking_router  # noqa: E402
+from FareBeep.routers.admin import router as admin_router  # noqa: E402
+app.include_router(booking_router)
+app.include_router(admin_router)
