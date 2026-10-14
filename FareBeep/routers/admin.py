@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from FareBeep import main as _m
+from FareBeep import support
 from FareBeep.models import BookingSession, DeliveryReceipt, ProcessedMessage, Subscription, utcnow
 
 logger = logging.getLogger("farebeep.main")
@@ -61,7 +62,7 @@ def admin_ops(request: Request):
                 "paused": sum(1 for s in subs if s.paused),
             },
             "bookings": {str(getattr(k, "value", k)): v for k, v in bookings},
-            "support": {"open_threads": _m._ops_support_rows(db)},
+            "support": {"open_threads": support._ops_support_rows(db)},
             "ledger": _m._ops_ledger(db),
             "agent_this_process": dict(_m._agent_stats),
         }

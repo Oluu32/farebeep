@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from FareBeep import main
+from FareBeep import main, support
 from FareBeep.models import Base, BookingSession, User
 
 
@@ -58,12 +58,12 @@ def _booking(session_factory, user, status="paid", ref="FB-ABCD1234",
 
 def test_token_roundtrip():
     tok = main._ticket_link_token("2348144180146")
-    assert main._ticket_link_phone(tok) == "2348144180146"
+    assert support._ticket_link_phone(tok) == "2348144180146"
 
 
 def test_token_rejects_tamper_and_expiry():
     tok = main._ticket_link_token("2348144180146")
-    assert main._ticket_link_phone(tok[:-2] + "xx") is None
+    assert support._ticket_link_phone(tok[:-2] + "xx") is None
     # expired: craft a token with an old expiry using the same secret
     import base64
     import hashlib
@@ -73,7 +73,7 @@ def test_token_rejects_tamper_and_expiry():
                    hashlib.sha256).hexdigest()[:32]
     stale = base64.urlsafe_b64encode(
         f"{payload}.{sig}".encode()).decode().rstrip("=")
-    assert main._ticket_link_phone(stale) is None
+    assert support._ticket_link_phone(stale) is None
 
 
 def test_page_renders_paid_ticket(client, session_factory):

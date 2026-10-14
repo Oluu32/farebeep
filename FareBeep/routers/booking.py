@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from FareBeep import main as _m
+from FareBeep import support
 from FareBeep.models import BookingSession, User, utcnow
 from FareBeep.templating import render_html
 
@@ -108,7 +109,7 @@ def _checkin_target(booking) -> "tuple[str, str] | None":
 
 @router.get("/tickets", include_in_schema=False)
 def tickets_page(t: str = ""):
-    phone = _m._ticket_link_phone(t)
+    phone = support._ticket_link_phone(t)
     if not phone:
         return render_html("tickets.html", status_code=403, expired=True)
 
@@ -165,7 +166,7 @@ def tickets_page(t: str = ""):
 # ---------------------------------------------------------------------------
 @router.get("/tickets/pass", include_in_schema=False)
 def boarding_pass(t: str = "", b: str = ""):
-    phone = _m._ticket_link_phone(t)
+    phone = support._ticket_link_phone(t)
     if not phone:
         return HTMLResponse("Link expired - ask the bot for a fresh one.",
                             status_code=403)

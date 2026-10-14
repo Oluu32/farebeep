@@ -22,7 +22,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from FareBeep import chatstate, main
+from FareBeep import chatstate, main, support
 from FareBeep.models import Base, User
 
 ADMIN = "+2340000000001"
@@ -48,11 +48,11 @@ def _hermetic(monkeypatch, session_factory):
     monkeypatch.setattr(main.brain, "GEMINI_API_KEY", None)
     main._rate_hits.clear()
     main._rate_cooled.clear()
-    main._support_frustration.clear()
+    support._support_frustration.clear()
     yield
     main._rate_hits.clear()
     main._rate_cooled.clear()
-    main._support_frustration.clear()
+    support._support_frustration.clear()
 
 
 @pytest.fixture
@@ -333,3 +333,27 @@ def test_ops_panel_lists_open_threads(session_factory, user, monkeypatch):
     assert len(threads) == 1
     assert threads[0]["phone"] == USER
     assert threads[0]["status"] == "open"
+
+
+# --- module boundary: support.py owns these helpers ------------------------
+def test_support_module_owns_admin_console_and_ops_rows(session_factory,
+                                                        user, sent):
+    main._handle_incoming_message(USER, "SUPPORT")
+    sent.clear()
+
+    assert support._handle_admin_console(ADMIN, "/open") is True
+    assert any(USER in b for b in _to_admin(sent))
+
+    s = session_factory()
+    try:
+        rows = support._ops_support_rows(s)
+    finally:
+        s.close()
+    assert [r["phone"] for r in rows] == [USER]
+    assert rows[0]["relay"] == f"R {USER} "
+
+
+def test_ticket_link_token_roundtrip_lives_in_support():
+    tok = support._ticket_link_token(USER)
+    assert support._ticket_link_phone(tok) == USER
+    assert main._ticket_link_token is support._ticket_link_token
