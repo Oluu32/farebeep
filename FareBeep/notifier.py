@@ -14,17 +14,119 @@ pipeline in main.py never cares which one is wired:
 Switch with MESSAGING_PROVIDER in .env, or call get_notifier().
 """
 import logging
+from datetime import datetime
 
 import httpx
 
 from FareBeep.config import (MESSAGING_PROVIDER, META_ACCESS_TOKEN,
                              META_API_VERSION, META_PHONE_NUMBER_ID,
                              TELEGRAM_BOT_TOKEN, TWILIO_ACCOUNT_SID,
-                             TWILIO_AUTH_TOKEN, TWILIO_FROM_WHATSAPP)
+                             TWILIO_AUTH_TOKEN, TWILIO_FROM_WHATSAPP,
+                             META_TEMPLATE_FLIGHT_STATUS)
 
 logger = logging.getLogger("farebeep.notifier")
 
 GRAPH_BASE = "https://graph.facebook.com"
+
+
+_STATUS_LABELS = {
+    "scheduled": "ON TIME", "active": "IN THE AIR", "landed": "LANDED",
+    "delayed": "DELAYED", "cancelled": "CANCELLED",
+    "diverted": "DIVERTED", "incident": "INCIDENT",
+}
+_STATUS_GUIDANCE = {
+    "scheduled": "No changes so far - I'll tell you if that changes.",
+    "active": "Your flight is in the air.",
+    "landed": "Your flight has landed.",
+    "delayed": ("Check the departure board before you leave for the "
+                "airport - I'll message you if it moves again."),
+    "cancelled": ("Contact your airline to rebook, or tell me your route "
+                  "and I'll look for another flight."),
+    "diverted": ("Your flight was diverted - check with the airline for "
+                 "the new arrival airport."),
+    "incident": ("Your flight reported an incident - follow the airline's "
+                 "updates before you travel."),
+}
+
+
+def _clock(value):
+    """'2026-08-20T08:30:00+01:00' -> '08:30' (None when unparseable)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).strftime("%H:%M")
+    except ValueError:
+        return None
+
+
+def _minutes(value):
+    """Whole positive delay minutes, or None for on-time / unknown."""
+    try:
+        m = int(value)
+    except (TypeError, ValueError):
+        return None
+    return m if m > 0 else None
+
+
+def _duration(minutes: int) -> str:
+    h, m = divmod(minutes, 60)
+    return f"{h}h {m:02d}m" if h else f"{m} min"
+
+
+def format_flight_status(detail: dict) -> str:
+    """Human-readable flight status for the passenger (WhatsApp/Telegram).
+
+    `detail` is the dict from AviationstackClient.flight_detail; a bare
+    {"flight_iata", "status"} works too (the proactive template only
+    carries those two). Missing fields are simply left out.
+    """
+    d = detail or {}
+    code = str(d.get("flight_iata") or "Your flight").upper()
+    airline = d.get("airline")
+    status = str(d.get("status") or "").strip().lower()
+    label = _STATUS_LABELS.get(status, status.upper() or "STATUS UNKNOWN")
+
+    head = f"✈️ {airline + ' ' if airline else ''}{code} - {label}"
+    dep_delay = _minutes(d.get("dep_delay_min"))
+    if status == "delayed" and dep_delay:
+        head += f" by {_duration(dep_delay)}"
+    lines = [head]
+
+    dep = _clock(d.get("dep_scheduled"))
+    if dep:
+        parts = [f"Departs {dep}"]
+        dep_now = _clock(d.get("dep_estimated"))
+        if dep_now and dep_now != dep:
+            parts[0] += f" (now {dep_now})"
+        if d.get("dep_terminal"):
+            parts.append(f"Terminal {d['dep_terminal']}")
+        if d.get("dep_gate"):
+            parts.append(f"Gate {d['dep_gate']}")
+        lines.append(" · ".join(parts))
+
+    arr = _clock(d.get("arr_scheduled"))
+    if arr:
+        parts = [f"Arrives {arr}"]
+        arr_now = _clock(d.get("arr_estimated"))
+        if arr_now and arr_now != arr:
+            parts[0] += f" (now {arr_now})"
+        if d.get("arr_terminal"):
+            parts.append(f"Terminal {d['arr_terminal']}")
+        lines.append(" · ".join(parts))
+
+    lines.append(_STATUS_GUIDANCE.get(
+        status, "Check with your airline for the latest."))
+    return "\n".join(lines)
+
+
+def _degraded_template_text(template_name: str, parts: list) -> str:
+    """Plain-text stand-in for a template on channels without templates.
+    Flight-status alerts read as a sentence; anything else keeps the
+    generic 'name: params' form."""
+    if template_name == META_TEMPLATE_FLIGHT_STATUS and len(parts) >= 2:
+        return format_flight_status(
+            {"flight_iata": parts[0], "status": parts[1]})
+    return f"{template_name}: {' '.join(parts)}"
 
 
 def get_notifier():
@@ -255,7 +357,7 @@ class TwilioWhatsapp:
         """Sandbox has no templates - degrade to a plain-text push."""
         parts = [p if isinstance(p, str) else str(p)
                  for p in (body_parameters or [])]
-        body = f"{template_name}: {' '.join(parts)}"
+        body = _degraded_template_text(template_name, parts)
         return self.send_text(to, body)
 
 
@@ -409,5 +511,5 @@ class TelegramBot:
         """No templates outside WhatsApp - degrade to a plain-text push."""
         parts = [p if isinstance(p, str) else str(p)
                  for p in (body_parameters or [])]
-        body = f"{template_name}: {' '.join(parts)}"
+        body = _degraded_template_text(template_name, parts)
         return self.send_text(to, body)

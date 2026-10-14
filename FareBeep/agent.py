@@ -86,9 +86,12 @@ WHAT YOU CAN DO
 3. Watch a route for price drops, free (subscribe_alerts -> beep).
 4. Manage existing watches: list, pause, resume, cancel, edit the
    target, or clear it to drop-watch (manage_alerts).
-That's it. You cannot do round trips, international flights, or
-flight status. If asked, say so plainly in one line and offer what
-you CAN do.
+5. Check a flight's live status - on time, delayed by how long, gate
+   and terminal (check_flight_status). Track a booked flight so I
+   message you on delays or cancellations (track_flight_status).
+That's it. You cannot do round trips or international flights. If
+asked for those, say so plainly in one line and offer what you CAN
+do.
 
 STOP (never handle it yourself)
 If the user wants to stop/unsubscribe/erase everything ("stop",
@@ -286,6 +289,23 @@ class _ManageArgs(BaseModel):
     destination: str = Field(default="", description="Destination city or IATA")
     target_price: Optional[float] = Field(
         default=None, description="New NGN target (edit only).")
+
+
+class _FlightStatusArgs(BaseModel):
+    flight_iata: str = Field(
+        description="Flight number, e.g. P47123 (airline code + digits)")
+    flight_date: Optional[str] = Field(
+        default=None,
+        description="Travel date as YYYY-MM-DD. Omit for today.")
+
+
+class _TrackStatusArgs(BaseModel):
+    flight_iata: str = Field(
+        description="Flight number, e.g. P47123 (airline code + digits)")
+    flight_date: str = Field(description="Travel date as YYYY-MM-DD")
+    scheduled_departure: str = Field(
+        description=("Scheduled departure from the booking: 'YYYY-MM-DD HH:MM' "
+                     "(Lagos time) or 'HH:MM' on flight_date."))
 
 
 class _ReserveArgs(BaseModel):
@@ -592,6 +612,88 @@ def build_tools(db: Session, phone: str) -> list:
         return json.dumps({"ok": True, "summary": summary,
                            "realism_warning": note})
 
+    def check_flight_status(flight_iata: str, flight_date: str = None) -> str:
+        from FareBeep.dates import DateError, validate_flight_date
+        from FareBeep.dates import lagos_today
+        from FareBeep.notifier import format_flight_status
+        from FareBeep.status import (AviationstackClient, StatusLookupError,
+                                     normalize_flight_iata)
+        code = normalize_flight_iata(flight_iata)
+        if code is None:
+            return json.dumps({"found": False, "error":
+                               "that doesn't look like a flight number - "
+                               "ask for it, e.g. P47123"})
+        date = lagos_today().isoformat()
+        if (flight_date or "").strip():
+            try:
+                date = validate_flight_date(flight_date)
+            except DateError as e:
+                return json.dumps({"found": False, "error": f"bad date: {e}"})
+        api = AviationstackClient()
+        if not api.api_key:
+            return json.dumps({"found": False, "error":
+                               "live flight status isn't configured yet - "
+                               "I can't check delays right now"})
+        try:
+            detail = api.flight_detail(code, date)
+        except StatusLookupError as e:
+            logger.warning("check_flight_status lookup failed: %s", e)
+            return json.dumps({"found": False, "error":
+                               "flight status is unreachable right now - "
+                               "try again in a few minutes"})
+        if detail is None:
+            return json.dumps({"found": False, "error":
+                               f"no status record for {code} on {date}"})
+        return json.dumps({"found": True, "flight_date": date,
+                           "summary": format_flight_status(detail),
+                           **detail})
+
+    def track_flight_status(flight_iata: str, flight_date: str,
+                            scheduled_departure: str) -> str:
+        from FareBeep.dates import DateError, validate_flight_date
+        from FareBeep.status import (LAGOS_TZ, StatusService, as_utc,
+                                     normalize_flight_iata, parse_departure)
+        code = normalize_flight_iata(flight_iata)
+        if code is None:
+            return json.dumps({"watching": False, "error":
+                               "that doesn't look like a flight number - "
+                               "ask for it, e.g. P47123"})
+        try:
+            date = validate_flight_date(flight_date)
+        except DateError as e:
+            return json.dumps({"watching": False, "error": f"bad date: {e}"})
+        try:
+            dep = parse_departure(scheduled_departure, flight_date=date)
+        except ValueError:
+            return json.dumps({"watching": False, "error":
+                               "need the scheduled departure time, e.g. "
+                               "08:30 or 2026-08-20 08:30"})
+        user = db.query(User).filter(User.phone == phone).first()
+        if user is None:
+            return json.dumps({"watching": False,
+                               "error": "unknown user - say hello first"})
+        now = utcnow()
+        if dep <= now:
+            return json.dumps({"watching": False, "error":
+                               "that departure time has already passed"})
+        svc = StatusService(db)
+        watch = (svc.find_watch(user.user_id, code, date, dep)
+                 or svc.create_watch(None, user.user_id, code, date, dep))
+        start = as_utc(watch.watch_starts_at)
+        dep_local = as_utc(watch.scheduled_departure).astimezone(LAGOS_TZ)
+        if start <= now:
+            when = "I'm watching it now"
+        else:
+            start_local = start.astimezone(LAGOS_TZ)
+            when = (f"I'll start checking at {start_local:%H:%M} on "
+                    f"{start_local:%d %b}")
+        summary = (f"Tracking {code} on {date}, departing "
+                   f"{dep_local:%H:%M}. {when} - I'll message you on any "
+                   f"delay or cancellation.")
+        return json.dumps({
+            "watching": True, "flight_iata": code, "flight_date": date,
+            "watch_starts_at": start.isoformat(), "summary": summary})
+
     return [
         StructuredTool.from_function(
             func=search_fares, name="search_fares",
@@ -621,6 +723,20 @@ def build_tools(db: Session, phone: str) -> list:
                          "List first when unsure which watch they mean, "
                          "then act. Read out summaries."),
             args_schema=_ManageArgs),
+        StructuredTool.from_function(
+            func=check_flight_status, name="check_flight_status",
+            description=("Live status for one flight: on time, delayed (with "
+                         "minutes), cancelled, gate and terminal. Call when "
+                         "the user asks if a flight is delayed, on time, "
+                         "cancelled, or for its gate. Read out the summary."),
+            args_schema=_FlightStatusArgs),
+        StructuredTool.from_function(
+            func=track_flight_status, name="track_flight_status",
+            description=("Watch a booked flight so FareBeep messages on delays "
+                         "or cancellations; the watch starts 3 hours before "
+                         "departure. Call when the user wants a flight "
+                         "tracked, with its number, date and departure time."),
+            args_schema=_TrackStatusArgs),
     ]
 
 
