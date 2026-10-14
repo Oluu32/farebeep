@@ -49,7 +49,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 
-from FareBeep import brain, cards, chatstate
+from FareBeep import brain, cards, chatstate, ticket_delivery
 from FareBeep.config import (ADMIN_TOKEN, APP_BASE_URL, CONSENT_VERSION,
                              MESSAGING_PROVIDER, META_APP_SECRET,
                              META_VERIFY_TOKEN, RATE_LIMIT_PER_MIN,
@@ -634,33 +634,9 @@ def _handle_boarding_pass(phone: str, msg) -> None:
              f"{booking.destination} booking. View it anytime - "
              f"just say 'my bookings'.",
              user.name if user else None)
-        _email_boarding_pass(booking)
+        ticket_delivery.email_boarding_pass(booking)
     finally:
         db.close()
-
-
-def _email_boarding_pass(booking) -> None:
-    """Email the captured boarding pass back so the user keeps a copy
-    outside WhatsApp. PDFs/screenshot bytes only; best-effort."""
-    try:
-        from FareBeep import emailer
-        if not (emailer.is_configured() and booking.contact_email
-                and booking.boarding_pass_blob):
-            return
-        emailer.send_email(
-            booking.contact_email,
-            "Your FareBeep boarding pass - "
-            f"{booking.origin} -> {booking.destination}",
-            "Boarding pass attached (a copy of what you forwarded in "
-            "chat). Safe travels!\n- FareBeep",
-            attachment={"filename": booking.boarding_pass_name
-                        or "boarding-pass",
-                        "content_bytes": booking.boarding_pass_blob,
-                        "mime": booking.boarding_pass_mime
-                        or "application/pdf"})
-    except Exception as e:  # noqa: BLE001
-        logger.error("Boarding pass email failed for %s: %s",
-                     booking.payment_ref, e)
 
 
 def _send_beep_flow(phone: str) -> None:
@@ -1985,7 +1961,7 @@ def _try_ticket_details_answer(db, user: User, text: str) -> bool:
     _say(user.phone,
          f"✅ All set! Ticket for *{booking.passenger_name}* goes to "
          f"{email}. Here's your voucher:", user.name)
-    _send_ticket_pdf(booking, pnr)
+    ticket_delivery.send_ticket_pdf(booking, pnr, notifier)
     return True
 
 
@@ -3203,88 +3179,6 @@ def _notify_session_user(session, text: str) -> None:
                        session.payment_ref, text)
         return
     notifier.send_text(user.phone, text)
-
-
-def _send_ticket_pdf(session, pnr: str) -> None:
-    """Render the booking voucher, email it (compiled summary in the body)
-    and push it as a WhatsApp document.
-    Best-effort: a PDF failure must never mask the paid confirmation."""
-    try:
-        from FareBeep.ticket_pdf import render_ticket_pdf
-        data = render_ticket_pdf(session, pnr, city_name=city_name)
-        _email_voucher(session, pnr, data)
-        if not hasattr(notifier, "send_document"):
-            logger.info("Channel has no document support - ticket PDF "
-                        "skipped for %s", session.payment_ref)
-            return
-        db = SessionLocal()
-        try:
-            user = (db.query(User)
-                    .filter(User.user_id == session.user_id).first())
-        finally:
-            db.close()
-        if user is None:
-            return
-        notifier.send_document(
-            user.phone, data, filename=f"FareBeep-{pnr}.pdf",
-            caption=f"Your FareBeep booking - PNR {pnr}. "
-                    f"Present this at check-in.")
-    except Exception as e:
-        logger.error("Ticket PDF send failed for %s: %s",
-                     session.payment_ref, e)
-
-
-def _email_voucher(session, pnr: str, pdf: bytes) -> None:
-    """Email the voucher PDF with a compiled booking summary as the body.
-    PDFs only (per product decision); best-effort - never raises."""
-    try:
-        from FareBeep import emailer
-        if not emailer.is_configured() or not session.contact_email:
-            return
-        details = session.flight_details or {}
-        body = (
-            f"Booking confirmed - here's everything on record.\n\n"
-            f"PNR: {pnr}\n"
-            f"Passenger: {session.passenger_name or '—'}\n"
-            f"Route: {city_name(session.origin)} ({session.origin}) -> "
-            f"{city_name(session.destination)} ({session.destination})\n"
-            f"Date: {session.flight_date}\n"
-            f"Airline: {details.get('airline') or '—'}\n"
-            f"Airline price: ₦{session.airline_price:,.0f}\n"
-            f"Markup + fees: ₦{(session.markup or 0) + (session.processing_fee or 0):,.0f}\n"
-            f"TOTAL PAID: ₦{session.total_price:,.0f}\n"
-            f"Paid at: {(session.paid_at or utcnow()).strftime('%Y-%m-%d %H:%M')} UTC\n\n"
-            f"The voucher is attached as a PDF. Safe travels!\n"
-            f"- FareBeep")
-        sent = emailer.send_email(
-            session.contact_email, f"Your FareBeep booking - PNR {pnr}",
-            body, attachment={"filename": f"FareBeep-{pnr}.pdf",
-                              "content_bytes": pdf,
-                              "mime": "application/pdf"})
-        if not sent:
-            logger.info("Voucher email not sent for %s (unconfigured or "
-                        "rejected)", session.payment_ref)
-    except Exception as e:  # noqa: BLE001
-        logger.error("Voucher email failed for %s: %s", session.payment_ref, e)
-
-
-def _ask_ticket_details(db, session, pnr: str) -> None:
-    """Paid booking whose ticket-holder details never arrived (the /book
-    page form was skipped). Park the booking in a two-step chat ask; the
-    voucher goes out once both answers land."""
-    user = db.get(User, session.user_id)
-    if user is None:
-        logger.warning("No user for paid session %s - cannot ask for "
-                       "ticket details", session.payment_ref)
-        return
-    chatstate.set_pending_ticket_details(db, user.phone, {
-        "booking_id": str(session.id), "stage": "name", "pnr": pnr})
-    notifier.send_text(user.phone,
-                       "Almost done with your ticket 🎫 - one detail "
-                       "missing: what's the traveller's full name as it "
-                       "appears on their ID?")
-
-
 
 
 # ---------------------------------------------------------------------------

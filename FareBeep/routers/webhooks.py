@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from FareBeep import main as _m
-from FareBeep import ticketing
+from FareBeep import ticket_delivery, ticketing
 
 logger = logging.getLogger("farebeep.main")
 router = APIRouter()
@@ -137,11 +137,9 @@ async def paystack_webhook(request: Request):
                 f"{session.flight_date}\n"
                 f"Paid: ₦{session.total_price:,.0f}\n"
                 f"{ticket_note} Safe travels!")
-            if session.passenger_name and session.contact_email:
-                _m._send_ticket_pdf(session, pnr)
-            else:
-                # /book page form skipped - collect in chat, then voucher.
-                _m._ask_ticket_details(db, session, pnr)
+            # Voucher when ticket-holder details are on file; otherwise
+            # the /book form was skipped - collect them in chat first.
+            ticket_delivery.dispatch_ticket(db, session, pnr, _m.notifier)
         elif outcome["outcome"] == "refund_required":
             _m._notify_session_user(
                 session,

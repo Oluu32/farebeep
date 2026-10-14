@@ -404,6 +404,30 @@ class TelegramBot:
             logger.error("Telegram message failed to %s: %s", to, e)
             return False
 
+    def send_document(self, to: str, data: bytes, filename: str,
+                      caption: str = None,
+                      mime: str = "application/pdf") -> bool:
+        """sendDocument: upload the file straight into the chat (multipart).
+        Lets the ticket PDF reach Telegram users like it reaches WhatsApp."""
+        if not self._ready:
+            logger.warning("TELEGRAM_BOT_TOKEN not set - document NOT sent "
+                           "to %s", to)
+            return False
+        form = {"chat_id": to}
+        if caption:
+            form["caption"] = caption[:1024]
+        try:
+            resp = self._http.post(
+                self._api_url("sendDocument"), data=form,
+                files={"document": (filename, data, mime)})
+            resp.raise_for_status()
+            ok = bool(resp.json().get("ok"))
+            logger.info("Telegram document sent to %s (ok=%s)", to, ok)
+            return ok
+        except Exception as e:
+            logger.error("Telegram document failed to %s: %s", to, e)
+            return False
+
     def send_action(self, to: str, action: str = "typing") -> bool:
         """Typing indicator (sendChatAction). Telegram shows it ~5s, so
         call on receipt - the reply lands while it is still visible on

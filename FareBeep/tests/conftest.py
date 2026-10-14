@@ -100,6 +100,8 @@ def _hermetic_network(monkeypatch):
                             lambda to, body, **k: True, raising=False)
         monkeypatch.setattr(main_mod.notifier, "send_action",
                             lambda to, action="typing": True, raising=False)
+        monkeypatch.setattr(main_mod.notifier, "send_document",
+                            lambda *a, **k: True, raising=False)
     yield
 
 

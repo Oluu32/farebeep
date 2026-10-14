@@ -1,7 +1,7 @@
 """TICKET PDF - voucher rendering + document push after Paystack settle."""
 import pytest
 
-from FareBeep import main
+from FareBeep import main, ticket_delivery
 from FareBeep.ticket_pdf import render_ticket_pdf
 
 
@@ -61,7 +61,7 @@ def test_paystack_paid_sends_document(monkeypatch, db):
     db.commit()
     db.refresh(b)
 
-    main._send_ticket_pdf(b, "FB-1234")
+    ticket_delivery.send_ticket_pdf(b, "FB-1234", fake)
     assert len(sent_docs) == 1
     to, data, filename = sent_docs[0]
     assert to == "2348144180146"
@@ -77,4 +77,4 @@ def test_pdf_failure_never_raises(monkeypatch, db):
         "FareBeep.ticket_pdf.render_ticket_pdf",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = BookingSession(payment_ref="FB-X", user_id=None)
-    main._send_ticket_pdf(b, "FB-9999")  # must not raise
+    ticket_delivery.send_ticket_pdf(b, "FB-9999", None)  # must not raise
