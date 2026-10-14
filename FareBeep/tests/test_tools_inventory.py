@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from FareBeep import main, transactions
+from FareBeep import main, ticketing, transactions
 from FareBeep.models import (Base, BookingSession, FareLedger, User, utcnow)
 from FareBeep.transactions import BookingService
 
@@ -329,10 +329,10 @@ def _paid_session(db):
 def test_paystack_webhook_issues_real_pnr(client, db,
                                           monkeypatch):
     """Paid + Travels247 creds + stored token/travellers -> real PNR in the beep."""
-    monkeypatch.setattr(main, "TRAVELS247_EMAIL", "p@x.com")
-    monkeypatch.setattr(main, "TRAVELS247_PASSWORD", "pw")
-    monkeypatch.setattr(main, "get_inventory_client",
-                        lambda *a, **k: FakeTravels247(pnr="ABC123"))
+    sky = FakeTravels247(pnr="ABC123")
+    sky.email, sky.password = "p@x.com", "pw"
+    monkeypatch.setattr(ticketing, "get_inventory_client",
+                        lambda *a, **k: sky)
     sent = []
     monkeypatch.setattr(main.notifier, "send_text",
                         lambda to, body: sent.append((to, body)) or True)
@@ -350,8 +350,8 @@ def test_paystack_webhook_issues_real_pnr(client, db,
 def test_paystack_webhook_keeps_provisional_pnr_without_247travels(
         client, db, monkeypatch):
     """No Travels247 creds configured -> the mock-PNR path is preserved."""
-    monkeypatch.setattr(main, "TRAVELS247_EMAIL", None)
-    monkeypatch.setattr(main, "TRAVELS247_PASSWORD", None)
+    monkeypatch.setattr(ticketing, "get_inventory_client",
+                        lambda *a, **k: FakeTravels247())
     sent = []
     monkeypatch.setattr(main.notifier, "send_text",
                         lambda to, body: sent.append((to, body)) or True)

@@ -54,8 +54,7 @@ from FareBeep.config import (ADMIN_TOKEN, APP_BASE_URL, CONSENT_VERSION,
                              MESSAGING_PROVIDER, META_APP_SECRET,
                              META_VERIFY_TOKEN, RATE_LIMIT_PER_MIN,
                              REQUOTE_TOLERANCE_NGN, TELEGRAM_BOT_TOKEN,
-                             TRAVELS247_EMAIL,
-                             TRAVELS247_PASSWORD, ELEVENLABS_TOOL_SECRET,
+                             ELEVENLABS_TOOL_SECRET,
                              GROQ_API_KEY, GUIDED_MODE,
                              SUPPORT_TICKET_TTL_HOURS)
 from FareBeep.database import SessionLocal, init_db
@@ -3164,47 +3163,13 @@ async def tools_reserve(request: Request):
 
 async def _maybe_issue_247travels_ticket(session,
                                       fallback_pnr: str) -> tuple:
-    """Paid webhook: turn the stored Travels247 booking_token into a real PNR.
+    """Deprecated shim: ticketing now lives in FareBeep.ticketing.
 
-    Runs only when Travels247 creds are configured AND the session carries a
-    booking_token + travellers (stored by /tools/reserve). Anything
-    missing, or any Travels247 failure -> (fallback_pnr, provisional note):
-    the booking stays PAID and the mock-PNR path is preserved.
+    Kept so older call sites keep working; the Paystack webhook calls
+    ticketing.issue_pnr directly.
     """
-    provisional = " (provisional)"
-    pending_note = ("Your e-ticket is issued once the airline confirms "
-                    "availability.")
-    details = session.flight_details or {}
-    token, travellers = details.get("booking_token"), details.get("travellers")
-    if not (TRAVELS247_EMAIL and TRAVELS247_PASSWORD):
-        return fallback_pnr, pending_note, provisional
-    if not token or not travellers:
-        logger.info("Travels247 ticketing skipped for %s (no token/travellers)",
-                    session.payment_ref)
-        return fallback_pnr, pending_note, provisional
-    sky = get_inventory_client()
-    try:
-        pax = details.get("passengers") or {}
-        priced = await sky.verify_price(
-            token, adults=_as_int(pax.get("adults"), 1),
-            children=_as_int(pax.get("children"), 0),
-            infants=_as_int(pax.get("infants"), 0))
-        res = await sky.reserve(
-            priced["booking_token"], travellers,
-            adults=_as_int(pax.get("adults"), 1),
-            children=_as_int(pax.get("children"), 0),
-            infants=_as_int(pax.get("infants"), 0))
-        logger.info("TRAVELS247 TICKET %s -> PNR %s",
-                    session.payment_ref, res["pnr"])
-        deadline = (f" Ticket deadline: {res['ticket_deadline']}."
-                    if res.get("ticket_deadline") else "")
-        return res["pnr"], f"E-ticket issued.{deadline}", ""
-    except Travels247Error as e:
-        logger.error("Travels247 ticketing failed for %s: %s - keeping "
-                     "provisional PNR", session.payment_ref, e)
-        return fallback_pnr, pending_note, provisional
-    finally:
-        await sky.close()
+    from FareBeep import ticketing
+    return tuple(await ticketing.issue_pnr(session, fallback_pnr))
 
 
 # ---------------------------------------------------------------------------

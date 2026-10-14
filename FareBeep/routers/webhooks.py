@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from FareBeep import main as _m
+from FareBeep import ticketing
 
 logger = logging.getLogger("farebeep.main")
 router = APIRouter()
@@ -126,7 +127,7 @@ async def paystack_webhook(request: Request):
 
         session = outcome.get("session")
         if outcome["outcome"] == "paid":
-            pnr, ticket_note, provisional = await _m._maybe_issue_247travels_ticket(
+            pnr, ticket_note, provisional = await ticketing.issue_pnr(
                 session, outcome.get("pnr") or "FB-????")
             _m._notify_session_user(
                 session,
