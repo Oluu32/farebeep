@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from FareBeep import main as _m
-from FareBeep import ticket_delivery, ticketing
+from FareBeep import inbound, ticket_delivery, ticketing
 
 logger = logging.getLogger("farebeep.main")
 router = APIRouter()
@@ -46,7 +46,8 @@ async def meta_webhook(request: Request, background: BackgroundTasks):
     # Status callbacks ride the same webhook - record first so a
     # statuses-only payload still tracks delivery before the 200 ack.
     _m._record_statuses(payload)
-    claimed = _m._claim_inbound_messages(_m._classify_all_entries(payload))
+    claimed = inbound._claim_inbound_messages(
+        inbound._classify_all_entries(payload))
 
     # Ack Meta immediately (20s deadline); the batch runs off-thread.
     # NOTE: plain "200 OK" (not {"status":"ok"}) keeps the existing
