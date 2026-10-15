@@ -63,13 +63,13 @@ def test_poll_once_offset_never_goes_backwards(monkeypatch):
 
 def test_poll_once_accepts_callback_query_updates(monkeypatch):
     """Fare-card button taps ride the poller too: callback_query updates
-    route into main._telegram_callback (the SAME gates as the webhook)
+    route into interactive._telegram_callback (the SAME gates as the webhook)
     and advance the offset."""
     handled, callbacks = [], []
     monkeypatch.setattr(poller, "_handle",
                         lambda cid, text: handled.append((cid, text)))
 
-    import FareBeep.main as main_mod
+    import FareBeep.interactive as main_mod
     monkeypatch.setattr(main_mod, "_telegram_callback",
                         lambda cb_id, chat_id, data:
                         callbacks.append((cb_id, chat_id, data)))

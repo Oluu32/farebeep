@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from FareBeep import main
+from FareBeep import interactive, main
 from FareBeep.models import Base, BookingSession, User
 from FareBeep.whatsapp.router import InboundMessage, MessageType
 
@@ -80,10 +80,10 @@ def test_forward_pass_attaches_to_latest_paid_booking(
     monkeypatch.setattr(main, "SessionLocal", session_factory)
     monkeypatch.setattr(main, "_say",
                         lambda phone, text, name=None, **kw: sent.append(text))
-    monkeypatch.setattr(main, "_download_whatsapp_media",
+    monkeypatch.setattr(interactive, "_download_whatsapp_media",
                         lambda mid: (b"%PDF-1.4 fake", "application/pdf"))
     user, bid = _user_with_paid_booking(session_factory)
-    main._handle_boarding_pass(user, _doc_msg(phone=user))
+    interactive._handle_boarding_pass(user, _doc_msg(phone=user))
     assert "Boarding pass saved" in sent[0]
     s = session_factory()
     b = s.get(BookingSession, bid)
@@ -98,9 +98,9 @@ def test_forward_without_booking_gets_polite_reply(
     monkeypatch.setattr(main, "SessionLocal", session_factory)
     monkeypatch.setattr(main, "_say",
                         lambda phone, text, name=None, **kw: sent.append(text))
-    monkeypatch.setattr(main, "_download_whatsapp_media",
+    monkeypatch.setattr(interactive, "_download_whatsapp_media",
                         lambda mid: (b"x", "application/pdf"))
-    main._handle_boarding_pass("234999999001", _doc_msg(phone="234999999001"))
+    interactive._handle_boarding_pass("234999999001", _doc_msg(phone="234999999001"))
     assert "confirmed ticket" in sent[0].lower()
 
 

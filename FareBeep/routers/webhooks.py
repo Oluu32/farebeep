@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from FareBeep import main as _m
-from FareBeep import inbound, ticket_delivery, ticketing
+from FareBeep import interactive, inbound, ticket_delivery, ticketing
 
 logger = logging.getLogger("farebeep.main")
 router = APIRouter()
@@ -80,7 +80,7 @@ async def telegram_webhook(request: Request, background: BackgroundTasks):
         cb_chat = str(((cbq.get("message") or {}).get("chat") or {})
                       .get("id") or "")
         if cb_id:
-            background.add_task(_m._telegram_callback, cb_id, cb_chat, data)
+            background.add_task(interactive._telegram_callback, cb_id, cb_chat, data)
         return {"ok": True}
     message = update.get("message") or {}
     chat = message.get("chat") or {}

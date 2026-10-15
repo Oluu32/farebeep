@@ -424,6 +424,7 @@ def _dispatch_single(msg) -> None:
     lives here (background) so the webhook thread never blocks on network.
     Turn handlers are resolved on main at call time so patches apply."""
     from FareBeep.whatsapp.router import MessageType
+    from FareBeep import interactive as ix
     m = _main()
     phone = msg.from_number or ""
     if not phone:
@@ -446,17 +447,17 @@ def _dispatch_single(msg) -> None:
             m._handle_incoming_message(phone, legacy)
         return
     if msg.message_type == MessageType.FLOW_RESPONSE:
-        m._handle_flow_completion(phone, msg.flow_token, msg.flow_data)
+        ix._handle_flow_completion(phone, msg.flow_token, msg.flow_data)
         return
     if msg.message_type in (MessageType.BUTTON_REPLY,
                             MessageType.LIST_REPLY):
         tap_id = msg.button_id or msg.list_id or ""
         if not tap_id:
             return
-        m._dispatch_tap(phone, tap_id, source="meta")
+        ix._dispatch_tap(phone, tap_id, source="meta")
         return
     if msg.message_type == MessageType.DOCUMENT:
-        m._handle_boarding_pass(phone, msg)
+        ix._handle_boarding_pass(phone, msg)
         return
     logger.info("Inbound %s from %s needs no concierge turn - ignored",
                 msg.message_type, phone)
