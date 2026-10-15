@@ -36,7 +36,6 @@ import logging
 import os
 import re
 import time
-import uuid
 from typing import Optional
 
 from contextlib import asynccontextmanager
@@ -44,22 +43,19 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               PlainTextResponse, RedirectResponse)
+                               PlainTextResponse)
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func
 
-from FareBeep import brain, cards, chatstate, ticket_delivery
+from FareBeep import brain, cards, ticket_delivery
 from FareBeep.config import (ADMIN_TOKEN, APP_BASE_URL, CONSENT_VERSION,
                              MESSAGING_PROVIDER, META_APP_SECRET,
-                             META_VERIFY_TOKEN, RATE_LIMIT_PER_MIN,
+                             META_VERIFY_TOKEN,
                              REQUOTE_TOLERANCE_NGN, TELEGRAM_BOT_TOKEN,
                              ELEVENLABS_TOOL_SECRET,
                              GROQ_API_KEY, GUIDED_MODE)
 from FareBeep.database import SessionLocal, init_db
 from FareBeep.iata import city_name, resolve_iata
-from FareBeep.models import (BookingSession, DeliveryReceipt,
-                             FareLedger, SessionStatus, User,
-                             utcnow)
+from FareBeep.models import BookingSession, User, utcnow
 from FareBeep.notifier import MetaWhatsapp, get_notifier
 from FareBeep.templating import render_html
 from FareBeep.payments import verify_paystack_signature
@@ -67,7 +63,7 @@ from FareBeep.search import LedgerOnlyEngine, LedgerSearch
 from FareBeep.suppliers import get_inventory_client, pick_cheapest
 from FareBeep.travels247 import Travels247Error  # supplier error shape (shared contract)
 from FareBeep.transactions import BookingService, PaystackError
-from FareBeep.inbound import (LEASE_SECONDS, MAX_INBOUND_ATTEMPTS,
+from FareBeep.inbound import (MAX_INBOUND_ATTEMPTS,
                               _arrival_key, _claim_inbound_messages,
                               _classify_all_entries, _dispatch_single,
                               _lease_owner, _mark_processed, _phone_lock,
@@ -82,17 +78,9 @@ from FareBeep.subscriptions import (_flow_target_price, _handle_manage,
                                     _reply_unsubscribe, _send_beep_flow,
                                     _tap_alert_by_phone, _tap_beep_by_phone)
 from FareBeep.dialog import (
-    _SESSION_GREETINGS, _is_session_greeting, RESTING_NOTE, _ops_ledger,
-    _MY_TRIPS_PHRASES, _handle_my_bookings, _RATE_LIMIT, _RATE_WINDOW,
-    _rate_hits, _rate_cooled, _COOLDOWN_TEXT, _rate_allow,
-    _handle_incoming_message, _say, _YES_WORDS, _NO_WORDS, _NAME_TOO_SHORT,
-    _booking_name_ok, _try_booking_answer, _try_ticket_details_answer,
-    _try_requote_answer, _reply_requoted_booking, _fill_pending_fare,
-    _fill_pending_date, _try_date_confirm, _ask_date_confirm,
-    _needs_date_confirm, _ask_missing_info, _get_or_create_user, _try_pick,
-    _PICK_RE, _PICK_SIGNAL_RE, _QUESTION_RE, _looks_like_pick, _reply_fare,
-    _fresh_label, _booking_total, _reply_booking, _create_and_send_booking,
-    _reply_status_ack,
+    _is_session_greeting, _ops_ledger, _handle_my_bookings, _RATE_LIMIT,
+    _rate_hits, _rate_cooled, _rate_allow, _handle_incoming_message, _say,
+    _get_or_create_user, _try_pick, _reply_fare,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -917,7 +905,6 @@ app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 def og_image():
     """The social-share card. Meta/WhatsApp/Twitter crawlers ignore SVG,
     so the SVG source is rendered to PNG once and cached in memory."""
-    import struct, zlib
     png_path = WEB_DIR / "og.png"
     if not png_path.exists():
         png_path = WEB_DIR / "og.svg"
