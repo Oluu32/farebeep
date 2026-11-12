@@ -129,6 +129,19 @@ def clear_pending_ticket_details(db, phone: str) -> None:
 MAX_AGENT_HISTORY = 12   # rolling window: the last ~6 turns
 
 
+def get_pending_voice(db, phone: str) -> Optional[dict]:
+    return _read(db, phone, "pending_voice")
+
+
+def set_pending_voice(db, phone: str, ctx: dict) -> None:
+    _write(db, phone, "pending_voice", ctx)
+
+
+def clear_pending_voice(db, phone: str) -> None:
+    if _read(db, phone, "pending_voice") is not None:
+        _write(db, phone, "pending_voice", None)
+
+
 def get_agent_history(db, phone: str) -> list:
     """The Groq agent's rolling memory: [{role, content}...] (may be empty)."""
     return _read(db, phone, "agent_history") or []

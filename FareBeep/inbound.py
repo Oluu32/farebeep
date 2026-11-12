@@ -459,6 +459,9 @@ def _dispatch_single(msg) -> None:
     if msg.message_type == MessageType.DOCUMENT:
         ix._handle_boarding_pass(phone, msg)
         return
+    if msg.message_type == MessageType.AUDIO:
+        ix._handle_whatsapp_voice(phone, msg)
+        return
     logger.info("Inbound %s from %s needs no concierge turn - ignored",
                 msg.message_type, phone)
 

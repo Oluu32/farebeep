@@ -216,6 +216,7 @@ create table if not exists chat_state (
     agent_history jsonb,
     support_ticket jsonb,
     pending_booking jsonb,
+    pending_voice jsonb,
     updated_at  timestamptz not null default now()
 );
 

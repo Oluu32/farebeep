@@ -126,6 +126,20 @@ GROQ_MODEL = _get("GROQ_MODEL", "openai/gpt-oss-120b")
 # The agent is skipped and parse_intent runs fully offline.
 GUIDED_MODE = _get("GUIDED_MODE", "") == "1"
 
+# --- Voice notes (voice.py) ---
+# VOICE_ASR: "auto" (NaijaVox when NAIJAVOX_URL is set, Groq Whisper as
+# fallback), "naijavox" (only), "groq" (only), or "off" (voice notes get
+# a polite "please type it" reply).
+VOICE_ASR = _get("VOICE_ASR", "auto")
+# Your own NaijaVox-2.0 deployment (Axiveri/NaijaVox-2.0 is not served by
+# any serverless provider): a Hugging Face Inference Endpoint URL or any
+# server that takes raw audio bytes and returns {"text": "..."}.
+NAIJAVOX_URL = _get("NAIJAVOX_URL")
+NAIJAVOX_TOKEN = _get("NAIJAVOX_TOKEN")          # HF token for the endpoint
+NAIJAVOX_LANGUAGE = _get("NAIJAVOX_LANGUAGE", "")  # pcm|en|yo|ha|ig hint
+GROQ_ASR_MODEL = _get("GROQ_ASR_MODEL", "whisper-large-v3")
+VOICE_ASR_TIMEOUT = _get_float("VOICE_ASR_TIMEOUT", 45.0)
+
 # --- Primary inventory: 247Travels Travels247 (Xown Solutions) ---
 # Search (external) -> Pricing (verify) -> Reserve (PNR). JWT login with
 # the partner api-role account; the 900s access token is cached and the

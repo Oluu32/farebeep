@@ -120,6 +120,10 @@ class ChatState(Base):
                                                  # status, messages: [...]} -
                                                  # the human-support relay
                                                  # thread (Phase 1: no table)
+    pending_voice = Column(JSON, nullable=True)    # voice.VoiceDraft.to_state():
+                                                 # a transcribed voice note
+                                                 # waiting for YES / the
+                                                 # missing piece (voice.py)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

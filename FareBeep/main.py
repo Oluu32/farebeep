@@ -340,7 +340,13 @@ async def twilio_webhook(request: Request, background: BackgroundTasks):
 
     phone = str(form.get("From", "")).removeprefix("whatsapp:")
     text = str(form.get("Body", ""))
-    if text and phone:
+    media_type0 = str(form.get("MediaContentType0", ""))
+    if (not text.strip() and phone and media_type0.startswith("audio/")
+            and form.get("MediaUrl0")):
+        from FareBeep import interactive as _ix
+        background.add_task(_ix._handle_twilio_voice, phone,
+                            str(form.get("MediaUrl0")), media_type0)
+    elif text and phone:
         background.add_task(_handle_incoming_message, phone, text)
     return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>",
                     media_type="application/xml")
