@@ -257,6 +257,7 @@ def _apply_additive_migrations() -> None:
         ("chat_state", "pending_ticket_details", "JSONB"),
         ("chat_state", "support_ticket", "JSONB"),
         ("chat_state", "pending_booking", "JSONB"),
+        ("chat_state", "pending_voice", "JSONB"),
     ]
     engine = get_engine()
     with engine.begin() as conn:

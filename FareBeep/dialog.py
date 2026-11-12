@@ -151,14 +151,19 @@ def _rate_allow(phone: str, text: str) -> bool:
     return True
 
 
-def _handle_incoming_message(phone: str, text: str) -> None:
-    """PASS 2 - CONCIERGE LOGIC: intent -> ask / search / act -> reply."""
+def _handle_incoming_message(phone: str, text: str,
+                             _skip_rate: bool = False) -> None:
+    """PASS 2 - CONCIERGE LOGIC: intent -> ask / search / act -> reply.
+
+    _skip_rate=True is for turns that were already counted by the
+    throttle (a confirmed voice note re-entering as text) - one customer
+    action must never cost two rate-limit hits."""
     # ADMIN CONSOLE first: /open, /done and R <phone> <text> relays are
     # consumed here - they never reach the throttle or the concierge,
     # and never create a User row for the admin phone.
     if _main()._handle_admin_console(phone, text):
         return
-    if not _rate_allow(phone, text):
+    if not _skip_rate and not _rate_allow(phone, text):
         return
     db = _main().SessionLocal()
     try:
@@ -180,6 +185,15 @@ def _handle_incoming_message(phone: str, text: str) -> None:
                 chatstate.clear_last_fare(db, user.phone)
                 chatstate.clear_last_fares(db, user.phone)
                 chatstate.clear_agent_history(db, user.phone)
+                chatstate.clear_pending_voice(db, user.phone)
+
+            # VOICE GATE: a typed YES / NO / missing piece answering the
+            # "🎙️ I heard ..." confirmation of a voice note. Before the
+            # pick gate: "yes" here confirms the heard search, and a bare
+            # "Abuja" fills the side the voice note didn't say.
+            from FareBeep import voice
+            if voice.try_voice_answer(db, user, text):
+                return
 
             # PICK GATE (before the brain): a "1", "2" or "3" reply right
             # after a ranked fare list selects and locks THAT fare. Narrow:

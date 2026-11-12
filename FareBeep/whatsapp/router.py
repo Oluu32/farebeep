@@ -13,6 +13,7 @@ class MessageType(str, Enum):
     FLOW_RESPONSE = "flow_response"
     INTERACTIVE = "interactive"
     DOCUMENT = "document"
+    AUDIO = "audio"
     UNSUPPORTED = "unsupported"
     STATUS_UPDATE = "status_update"
     UNKNOWN = "unknown"
@@ -97,7 +98,15 @@ def _parse(msg: dict) -> InboundMessage | None:
                                or media.get("caption") or "boarding-pass")
         base.media_mime = media.get("mime_type", "")
         return base
-    if t in ("audio", "video"):
+    if t == "audio":
+        # Voice notes (audio.voice=true) and forwarded audio files: both
+        # go to the voice pipeline (FareBeep.voice).
+        media = msg.get("audio", {}) or {}
+        base.message_type = MessageType.AUDIO
+        base.media_id = media.get("id", "")
+        base.media_mime = media.get("mime_type", "")
+        return base
+    if t == "video":
         base.message_type = MessageType.UNSUPPORTED
         return base
     return base

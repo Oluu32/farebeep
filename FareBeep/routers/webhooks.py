@@ -86,6 +86,13 @@ async def telegram_webhook(request: Request, background: BackgroundTasks):
     chat = message.get("chat") or {}
     chat_id = str(chat.get("id") or "")
     text = str(message.get("text") or "")
+    voice_obj = message.get("voice") or message.get("audio") or {}
+    if not text and chat_id and voice_obj.get("file_id"):
+        background.add_task(_m._telegram_typing, chat_id)
+        background.add_task(interactive._handle_telegram_voice, chat_id,
+                            str(voice_obj.get("file_id")),
+                            str(voice_obj.get("mime_type") or "audio/ogg"))
+        return {"ok": True}
     if text and chat_id:
         # typing bubble runs as a background task (FIFO, before the reply
         # task): a dead Telegram API must never delay the 200 ack

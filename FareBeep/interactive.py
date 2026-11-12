@@ -50,6 +50,75 @@ def _download_whatsapp_media(media_id: str) -> "tuple[bytes, str] | None":
         return None
 
 
+def _handle_whatsapp_voice(phone: str, msg) -> None:
+    """A WhatsApp voice note: download from Meta, hand to FareBeep.voice."""
+    from FareBeep import voice
+    media_id = msg.media_id or ""
+    got = _download_whatsapp_media(media_id) if media_id else None
+    if got is None:
+        voice.handle_voice_note(phone, None)
+        return
+    blob, mime = got
+    voice.handle_voice_note(phone, blob, msg.media_mime or mime or "audio/ogg")
+
+
+def _download_telegram_file(file_id: str) -> "tuple[bytes, str] | None":
+    """Telegram getFile -> bytes. Voice notes arrive as OGG/Opus."""
+    import httpx
+    from FareBeep.config import TELEGRAM_BOT_TOKEN
+    if not (file_id and TELEGRAM_BOT_TOKEN):
+        return None
+    try:
+        with httpx.Client(timeout=30) as client:
+            meta = client.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+                params={"file_id": file_id})
+            meta.raise_for_status()
+            path = ((meta.json() or {}).get("result") or {}).get("file_path")
+            if not path:
+                return None
+            blob = client.get(f"https://api.telegram.org/file/bot"
+                              f"{TELEGRAM_BOT_TOKEN}/{path}")
+            blob.raise_for_status()
+            return blob.content, ""
+    except Exception as e:
+        logger.warning("Telegram file download failed for %s: %s", file_id, e)
+        return None
+
+
+def _handle_telegram_voice(chat_id: str, file_id: str, mime: str) -> None:
+    from FareBeep import voice
+    got = _download_telegram_file(file_id)
+    voice.handle_voice_note(chat_id, got[0] if got else None,
+                            mime or "audio/ogg")
+
+
+def _download_twilio_media(url: str) -> "tuple[bytes, str] | None":
+    """Twilio MediaUrl0 (HTTP basic auth with the account SID/token)."""
+    import httpx
+    from FareBeep.config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+    if not url:
+        return None
+    try:
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
+            resp = client.get(url, auth=(TWILIO_ACCOUNT_SID or "",
+                                         TWILIO_AUTH_TOKEN or ""))
+            resp.raise_for_status()
+            return resp.content, resp.headers.get("content-type", "")
+    except Exception as e:
+        logger.warning("Twilio media download failed: %s", e)
+        return None
+
+
+def _handle_twilio_voice(phone: str, url: str, mime: str) -> None:
+    from FareBeep import voice
+    got = _download_twilio_media(url)
+    if got is None:
+        voice.handle_voice_note(phone, None)
+        return
+    voice.handle_voice_note(phone, got[0], mime or got[1] or "audio/ogg")
+
+
 def _handle_boarding_pass(phone: str, msg) -> None:
     """Store an airline-issued boarding pass (PDF or screenshot) the user
     forwarded in chat, attached to their most recent PAID booking."""
